@@ -139,8 +139,19 @@ def delete_book(book_id: int, x_api_key: Optional[str] = Header(None)):
 @app.get("/backup")
 def backup(x_api_key: Optional[str] = Header(None)):
     check_key(x_api_key)
+
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.execute("SELECT id, title, author, status, rating, notes, file_path FROM books")
     rows = cur.fetchall()
-    header
+    col_names = [column[0] for column in cur.description]
+    conn.close()
+
+    # Save CSV in the same directory as DB
+    with open(BACKUP_CSV, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(col_names)
+        writer.writerows(rows)
+
+    return {"detail": f"backup_written_to_{BACKUP_CSV}"}
+

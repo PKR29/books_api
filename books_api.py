@@ -104,12 +104,37 @@ def update_book(book_id: int, b: BookIn, x_api_key: Optional[str] = Header(None)
 @app.delete("/books/{book_id}")
 def delete_book(book_id: int, x_api_key: Optional[str] = Header(None)):
     check_key(x_api_key)
+
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
+
+    # 1. Delete the book
     cur.execute("DELETE FROM books WHERE id=?", (book_id,))
     conn.commit()
+
+    # 2. Fetch remaining books ordered by current ID
+    cur.execute("SELECT title, author, status, rating, notes, file_path FROM books ORDER BY id")
+    rows = cur.fetchall()
+
+    # 3. Clear the table
+    cur.execute("DELETE FROM books")
+    conn.commit()
+
+    # 4. Reinsert rows with NEW continuous IDs starting from 1
+    new_id = 1
+    for r in rows:
+        cur.execute(
+            "INSERT INTO books (id, title, author, status, rating, notes, file_path) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (new_id, r[0], r[1], r[2], r[3], r[4], r[5])
+        )
+        new_id += 1
+
+    conn.commit()
     conn.close()
-    return {"detail": "deleted"}
+
+    return {"detail": "deleted_and_renumbered"}
+
+
 
 @app.get("/backup")
 def backup(x_api_key: Optional[str] = Header(None)):

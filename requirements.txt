@@ -3,3 +3,9 @@ uvicorn
 requests
 pydantic
 python-multipart
+
+# Google Drive API dependencies:
+google-api-python-client
+google-auth
+google-auth-httplib2
+google-auth-oauthlib

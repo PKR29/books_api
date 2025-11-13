@@ -329,24 +329,60 @@ def save_all(payload: List[BookOut], x_api_key: Optional[str] = Header(None)):
 @app.get("/backup")
 def backup(x_api_key: Optional[str] = Header(None)):
     check_key(x_api_key)
-    # create CSV backup locally and upload DB as well (sync)
+
     try:
+        # -----------------------------
+        # 1. Read DB into CSV
+        # -----------------------------
         conn = sqlite3.connect(DB_FILE)
         cur = conn.cursor()
         cur.execute("SELECT id, title, author, status, rating, notes, file_path FROM books")
         rows = cur.fetchall()
         col_names = [column[0] for column in cur.description]
         conn.close()
+
+        # Write CSV locally
         with open(BACKUP_CSV, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(col_names)
             writer.writerows(rows)
-        # upload DB to Drive (ensure latest)
-        try:
-            upload_db_to_drive()
-        except Exception as e:
-            print("Upload during backup failed:", e)
-        return {"detail": f"backup_written_to_{BACKUP_CSV}"}
+
+        # -----------------------------
+        # 2. Get parent folder of books.db on Google Drive
+        # -----------------------------
+        file_info = drive_service.files().get(fileId=GOOGLE_DRIVE_FILE_ID, fields="parents").execute()
+        parents = file_info.get("parents", None)
+
+        if not parents:
+            raise HTTPException(status_code=500, detail="Unable to retrieve parent folder of books.db from Drive.")
+
+        parent_folder_id = parents[0]
+
+        # -----------------------------
+        # 3. Upload backup CSV to SAME folder
+        # -----------------------------
+        file_metadata = {
+            "name": BACKUP_CSV,      # same file name
+            "parents": [parent_folder_id]
+        }
+
+        media = MediaFileUpload(BACKUP_CSV, mimetype="text/csv", resumable=True)
+
+        # Search if a backup file already exists to update it instead of making duplicates
+        query = f"name = '{BACKUP_CSV}' and '{parent_folder_id}' in parents"
+        search = drive_service.files().list(q=query, fields="files(id)").execute()
+        existing_files = search.get('files', [])
+
+        if existing_files:
+            backup_id = existing_files[0]['id']
+            drive_service.files().update(fileId=backup_id, media_body=media).execute()
+            action = "updated"
+        else:
+            created = drive_service.files().create(body=file_metadata, media_body=media, fields="id").execute()
+            action = "created"
+
+        return {"detail": f"backup_{action}_in_drive"}
+
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail="Backup failed")
+        raise HTTPException(status_code=500, detail=f"Backup failed: {str(e)}")

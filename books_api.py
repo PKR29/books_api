@@ -364,36 +364,41 @@ def save_all(payload: List[BookOut], x_api_key: Optional[str] = Header(None)):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="save_all failed")
 
+import secrets
+import urllib.parse
+
 @app.get("/oauth_start")
 def oauth_start():
-    """Start Gmail OAuth login."""
+    """Start Gmail OAuth login (manually build auth_url with redirect_uri)."""
     if not OAUTH_CREDENTIALS_B64:
         raise HTTPException(500, "OAuth credentials missing")
 
+    # decode credentials and get redirect URI + auth URI + client_id
     cred_json = base64.b64decode(OAUTH_CREDENTIALS_B64).decode()
     cred_data = json.loads(cred_json)
 
     try:
-        redirect_uri = cred_data["installed"]["redirect_uris"][0]
+        installed = cred_data.get("installed") or cred_data.get("web")
+        client_id = installed["client_id"]
+        auth_uri = installed["auth_uri"]
+        redirect_uri = installed["redirect_uris"][0]
     except Exception:
-        raise HTTPException(500, "Invalid OAuth credentials: missing redirect_uris")
+        raise HTTPException(500, "Invalid OAuth credentials: missing installed/client_id/auth_uri/redirect_uris")
 
-    # Do NOT pass redirect_uri here — avoid duplicate error
-    flow = InstalledAppFlow.from_client_config(
-        cred_data,
-        SCOPES
-    )
-
-    auth_url, _ = flow.authorization_url(
-        prompt="consent",
-        access_type="offline"
-    )
-
-    # store redirect_uri inside state for finish step
-    return {
-        "auth_url": auth_url,
-        "redirect_to_use": redirect_uri
+    # build authorization URL manually to guarantee redirect_uri is included
+    state = secrets.token_urlsafe(16)
+    params = {
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "scope": " ".join(SCOPES),
+        "access_type": "offline",
+        "prompt": "consent",
+        "state": state
     }
+    auth_url = auth_uri + "?" + urllib.parse.urlencode(params, safe=":/")
+
+    return {"auth_url": auth_url, "redirect_to_use": redirect_uri, "state": state}
 
 
 @app.get("/oauth_finish")

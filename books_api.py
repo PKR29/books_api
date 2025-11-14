@@ -369,36 +369,32 @@ import urllib.parse
 
 @app.get("/oauth_start")
 def oauth_start():
-    """Start Gmail OAuth login (manually build auth_url with redirect_uri)."""
+    """Start OAuth login with a fixed redirect_uri."""
     if not OAUTH_CREDENTIALS_B64:
         raise HTTPException(500, "OAuth credentials missing")
 
-    # decode credentials and get redirect URI + auth URI + client_id
-    cred_json = base64.b64decode(OAUTH_CREDENTIALS_B64).decode()
-    cred_data = json.loads(cred_json)
+    cred_data = json.loads(base64.b64decode(OAUTH_CREDENTIALS_B64))
 
-    try:
-        installed = cred_data.get("installed") or cred_data.get("web")
-        client_id = installed["client_id"]
-        auth_uri = installed["auth_uri"]
-        redirect_uri = installed["redirect_uris"][0]
-    except Exception:
-        raise HTTPException(500, "Invalid OAuth credentials: missing installed/client_id/auth_uri/redirect_uris")
+    redirect_uri = cred_data["installed"]["redirect_uris"][0]  # should be http://localhost
 
-    # build authorization URL manually to guarantee redirect_uri is included
-    state = secrets.token_urlsafe(16)
-    params = {
-        "response_type": "code",
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "scope": " ".join(SCOPES),
-        "access_type": "offline",
-        "prompt": "consent",
-        "state": state
+    flow = InstalledAppFlow.from_client_config(
+        {"installed": cred_data},
+        SCOPES
+    )
+
+    # IMPORTANT: Only set redirect_uri in THIS place
+    flow.redirect_uri = redirect_uri
+
+    auth_url, _ = flow.authorization_url(
+        prompt="consent",
+        access_type="offline",
+        include_granted_scopes="true"
+    )
+
+    return {
+        "auth_url": auth_url,
+        "redirect_to_use": redirect_uri
     }
-    auth_url = auth_uri + "?" + urllib.parse.urlencode(params, safe=":/")
-
-    return {"auth_url": auth_url, "redirect_to_use": redirect_uri, "state": state}
 
 
 @app.get("/oauth_finish")
@@ -407,21 +403,20 @@ def oauth_finish(code: str):
     if not OAUTH_CREDENTIALS_B64:
         raise HTTPException(500, "OAuth credentials missing")
 
-    cred_json = base64.b64decode(OAUTH_CREDENTIALS_B64).decode()
-    cred_data = json.loads(cred_json)
+    cred_data = json.loads(base64.b64decode(OAUTH_CREDENTIALS_B64))
 
-    try:
-        redirect_uri = cred_data["installed"]["redirect_uris"][0]
-    except Exception:
-        raise HTTPException(500, "Invalid OAuth credentials: missing redirect_uris")
+    redirect_uri = cred_data["installed"]["redirect_uris"][0]
 
     flow = InstalledAppFlow.from_client_config(
-        cred_data,
+        {"installed": cred_data},
         SCOPES
     )
 
-    # MUST pass redirect_uri to solve "Missing required parameter: redirect_uri"
-    flow.fetch_token(code=code, redirect_uri=redirect_uri)
+    # AGAIN — only this line should set redirect_uri
+    flow.redirect_uri = redirect_uri
+
+    # FIXED: No redirect_uri parameter here
+    flow.fetch_token(code=code)
 
     token_json = json.dumps({
         "token": flow.credentials.token,
@@ -438,7 +433,6 @@ def oauth_finish(code: str):
         "message": "Paste this into Railway as OAUTH_TOKEN_B64",
         "base64_token": encoded
     }
-
 
 
 @app.post("/upload_ebook")

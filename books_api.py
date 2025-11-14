@@ -12,6 +12,7 @@ import csv
 import traceback
 from typing import List, Optional
 
+from fastapi import UploadFile, File
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,6 +33,8 @@ if not API_KEY:
 # file names inside the container (will be transient; we sync to Drive)
 DB_FILE = os.environ.get("BOOKS_DB_FILE", "books.db")
 BACKUP_CSV = os.environ.get("BOOKS_BACKUP_CSV", "books_backup.csv")
+BOOKS_OWNER_EMAIL = os.environ.get("BOOKS_OWNER_EMAIL")  # your personal Google email
+EBOOKS_FOLDER_ID = os.environ.get("EBOOKS_FOLDER_ID")
 
 # Google Drive related env vars
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")  # full JSON string
@@ -325,6 +328,99 @@ def save_all(payload: List[BookOut], x_api_key: Optional[str] = Header(None)):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="save_all failed")
+
+
+@app.post("/upload_ebook")
+async def upload_ebook(
+    file: UploadFile = File(...),
+    x_api_key: Optional[str] = Header(None)
+):
+    """
+    Upload an eBook file from the client to Google Drive.
+    The file will be uploaded into the SAME folder as books.db.
+    Returns the Drive links that can be stored in file_path.
+    """
+    check_key(x_api_key)
+
+    # 1. Save incoming file to a temporary path
+    temp_dir = "/tmp"
+    os.makedirs(temp_dir, exist_ok=True)
+    temp_path = os.path.join(temp_dir, file.filename)
+
+    try:
+        contents = await file.read()
+        with open(temp_path, "wb") as f:
+            f.write(contents)
+
+        # 2. Get parent folder of books.db in Drive
+        file_info = drive_service.files().get(
+            fileId=GOOGLE_DRIVE_FILE_ID,
+            fields="parents"
+        ).execute()
+        parents = file_info.get("parents", None)
+        if not parents:
+            raise HTTPException(status_code=500, detail="No parent folder found for books.db in Drive.")
+
+        parent_folder_id = parents[0]
+
+        # 3. Create metadata for the new ebook file
+        file_metadata = {
+            "name": file.filename,
+            "parents": [parent_folder_id]
+        }
+
+        media = MediaFileUpload(temp_path, resumable=True)
+
+        # 4. Upload the ebook file to Drive
+        created = drive_service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields="id, webViewLink, webContentLink"
+        ).execute()
+
+        ebook_id = created.get("id")
+        web_view_link = created.get("webViewLink")
+        web_content_link = created.get("webContentLink")
+
+        # 5. Share with your main Google account (viewer) if configured
+        if BOOKS_OWNER_EMAIL:
+            try:
+                permission_body = {
+                    "type": "user",
+                    "role": "reader",
+                    "emailAddress": BOOKS_OWNER_EMAIL
+                }
+                drive_service.permissions().create(
+                    fileId=ebook_id,
+                    body=permission_body,
+                    fields="id",
+                    sendNotificationEmail=False
+                ).execute()
+            except Exception as e:
+                print("Failed to set viewer permission for owner email:", e)
+
+        # 6. Clean up temp file
+        try:
+            os.remove(temp_path)
+        except Exception:
+            pass
+
+        # 7. Return link that Flutter app will store in file_path
+        return {
+            "id": ebook_id,
+            "webViewLink": web_view_link,
+            "webContentLink": web_content_link
+        }
+
+    except HTTPException:
+        # re-raise FastAPI HTTP exceptions
+        raise
+    except Exception as e:
+        print("Upload ebook error:", e)
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Upload ebook failed: {str(e)}")
+
+
 
 @app.get("/backup")
 def backup(x_api_key: Optional[str] = Header(None)):

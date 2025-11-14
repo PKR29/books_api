@@ -370,24 +370,30 @@ def oauth_start():
     if not OAUTH_CREDENTIALS_B64:
         raise HTTPException(500, "OAuth credentials missing")
 
-    # decode credentials and get redirect URI
     cred_json = base64.b64decode(OAUTH_CREDENTIALS_B64).decode()
     cred_data = json.loads(cred_json)
 
-    # cred_data should be { "installed": { ... , "redirect_uris": [...] } }
     try:
         redirect_uri = cred_data["installed"]["redirect_uris"][0]
     except Exception:
         raise HTTPException(500, "Invalid OAuth credentials: missing redirect_uris")
 
+    # Do NOT pass redirect_uri here — avoid duplicate error
     flow = InstalledAppFlow.from_client_config(
         cred_data,
         SCOPES
     )
 
-    # explicitly pass redirect_uri so Google receives it
-    auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline", redirect_uri=redirect_uri)
-    return {"auth_url": auth_url}
+    auth_url, _ = flow.authorization_url(
+        prompt="consent",
+        access_type="offline"
+    )
+
+    # store redirect_uri inside state for finish step
+    return {
+        "auth_url": auth_url,
+        "redirect_to_use": redirect_uri
+    }
 
 
 @app.get("/oauth_finish")
@@ -409,7 +415,7 @@ def oauth_finish(code: str):
         SCOPES
     )
 
-    # when exchanging the code, pass the same redirect_uri
+    # MUST pass redirect_uri to solve "Missing required parameter: redirect_uri"
     flow.fetch_token(code=code, redirect_uri=redirect_uri)
 
     token_json = json.dumps({

@@ -12,7 +12,6 @@ import json
 
 import os
 import io
-import json
 import sqlite3
 import csv
 import traceback
@@ -60,10 +59,10 @@ except Exception as e:
 
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
-# Drive scopes
+# Drive scopes (service account needs broader scope for DB operations)
 DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
 
-# Create credentials and service object (will be used for upload/download)
+# Create credentials and service object (will be used for upload/download of DB)
 try:
     credentials = service_account.Credentials.from_service_account_info(sa_info, scopes=DRIVE_SCOPES)
     drive_service = build("drive", "v3", credentials=credentials, cache_discovery=False)
@@ -108,7 +107,7 @@ def check_key(x_api_key: Optional[str]):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 # ---------------------------
-# Google Drive helpers
+# Google Drive helpers (service account for DB)
 # ---------------------------
 def download_db_from_drive():
     """
@@ -289,7 +288,7 @@ def get_oauth_drive_service():
         raise HTTPException(500, "OAuth token missing. You must authorize first.")
 
     # Refresh token if needed
-    if creds.expired and creds.refresh_token:
+    if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())
 
     return build("drive", "v3", credentials=creds)
@@ -350,7 +349,7 @@ def save_all(payload: List[BookOut], x_api_key: Optional[str] = Header(None)):
         for item in payload:
             cur.execute(
                 "INSERT INTO books (id, title, author, status, rating, notes, file_path) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (new_id, item.get("title", ""), item.get("author", ""), item.get("status", ""), item.get("rating", ""), item.get("notes", ""), item.get("file_path", ""))
+                (new_id, item.get("title", ""), item.get("author", ""), item.get("status", ""), item.get("rating", ""), item.get("notes", ""), item.get("file_path", "")) 
             )
             new_id += 1
         conn.commit()
@@ -414,7 +413,7 @@ async def upload_ebook(
     x_api_key: Optional[str] = Header(None)
 ):
     """
-    Upload an eBook file into the eBooks folder in Google Drive.
+    Upload an eBook file into the eBooks folder in Google Drive using OAuth (your Gmail).
     Returns public links used for file_path.
     """
     check_key(x_api_key)
@@ -435,7 +434,17 @@ async def upload_ebook(
         with open(temp_path, "wb") as f:
             f.write(contents)
 
-        # 2. Metadata for the Drive file (use the eBooks folder)
+        # 2. Build OAuth drive service (acts as your Gmail)
+        try:
+            drive = get_oauth_drive_service()
+        except HTTPException as he:
+            # pass through helpful error
+            raise he
+        except Exception as e:
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Failed to initialize OAuth Drive service: {str(e)}")
+
+        # 3. Metadata for the Drive file (use the eBooks folder)
         file_metadata = {
             "name": file.filename,
             "parents": [EBOOKS_FOLDER_ID]
@@ -443,43 +452,54 @@ async def upload_ebook(
 
         media = MediaFileUpload(temp_path, resumable=True)
 
-        # 3. Upload file to Drive inside eBooks folder
-        created = drive_service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields="id, webViewLink, webContentLink"
-        ).execute()
+        # 4. Upload file to Drive inside eBooks folder using OAuth drive client
+        try:
+            created = drive.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields="id, webViewLink, webContentLink"
+            ).execute()
+        except HttpError as he:
+            traceback.print_exc()
+            # surface a clearer message
+            raise HTTPException(status_code=500, detail=f"Upload ebook failed (Drive API): {str(he)}")
 
         ebook_id = created.get("id")
         view_url = created.get("webViewLink")
         download_url = created.get("webContentLink")
 
-        # 4. Share with main Google account (viewer)
+        # 5. Share with main Google account (viewer) using OAuth drive client
         if BOOKS_OWNER_EMAIL:
-            permission_body = {
-                "type": "user",
-                "role": "reader",
-                "emailAddress": BOOKS_OWNER_EMAIL
-            }
-            drive_service.permissions().create(
-                fileId=ebook_id,
-                body=permission_body,
-                sendNotificationEmail=False
-            ).execute()
+            try:
+                permission_body = {
+                    "type": "user",
+                    "role": "reader",
+                    "emailAddress": BOOKS_OWNER_EMAIL
+                }
+                drive.permissions().create(
+                    fileId=ebook_id,
+                    body=permission_body,
+                    sendNotificationEmail=False
+                ).execute()
+            except Exception as e:
+                # non-fatal: print and continue
+                print("Failed to set viewer permission for owner email (non-fatal):", e)
 
-        # 5. Cleanup
+        # 6. Cleanup
         try:
             os.remove(temp_path)
         except:
             pass
 
-        # 6. Return URLs for mobile app / PC
+        # 7. Return URLs for mobile app / PC
         return {
             "id": ebook_id,
             "webViewLink": view_url,
             "webContentLink": download_url
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(

@@ -336,13 +336,18 @@ async def upload_ebook(
     x_api_key: Optional[str] = Header(None)
 ):
     """
-    Upload an eBook file from the client to Google Drive.
-    The file will be uploaded into the SAME folder as books.db.
-    Returns the Drive links that can be stored in file_path.
+    Upload an eBook file into the eBooks folder in Google Drive.
+    Returns public links used for file_path.
     """
     check_key(x_api_key)
 
-    # 1. Save incoming file to a temporary path
+    if not EBOOKS_FOLDER_ID:
+        raise HTTPException(
+            status_code=500,
+            detail="EBOOKS_FOLDER_ID not configured on the server."
+        )
+
+    # 1. Save incoming file to temporary storage
     temp_dir = "/tmp"
     os.makedirs(temp_dir, exist_ok=True)
     temp_path = os.path.join(temp_dir, file.filename)
@@ -352,26 +357,15 @@ async def upload_ebook(
         with open(temp_path, "wb") as f:
             f.write(contents)
 
-        # 2. Get parent folder of books.db in Drive
-        file_info = drive_service.files().get(
-            fileId=GOOGLE_DRIVE_FILE_ID,
-            fields="parents"
-        ).execute()
-        parents = file_info.get("parents", None)
-        if not parents:
-            raise HTTPException(status_code=500, detail="No parent folder found for books.db in Drive.")
-
-        parent_folder_id = parents[0]
-
-        # 3. Create metadata for the new ebook file
+        # 2. Metadata for the Drive file (use the eBooks folder)
         file_metadata = {
             "name": file.filename,
-            "parents": [parent_folder_id]
+            "parents": [EBOOKS_FOLDER_ID]
         }
 
         media = MediaFileUpload(temp_path, resumable=True)
 
-        # 4. Upload the ebook file to Drive
+        # 3. Upload file to Drive inside eBooks folder
         created = drive_service.files().create(
             body=file_metadata,
             media_body=media,
@@ -379,47 +373,41 @@ async def upload_ebook(
         ).execute()
 
         ebook_id = created.get("id")
-        web_view_link = created.get("webViewLink")
-        web_content_link = created.get("webContentLink")
+        view_url = created.get("webViewLink")
+        download_url = created.get("webContentLink")
 
-        # 5. Share with your main Google account (viewer) if configured
+        # 4. Share with main Google account (viewer)
         if BOOKS_OWNER_EMAIL:
-            try:
-                permission_body = {
-                    "type": "user",
-                    "role": "reader",
-                    "emailAddress": BOOKS_OWNER_EMAIL
-                }
-                drive_service.permissions().create(
-                    fileId=ebook_id,
-                    body=permission_body,
-                    fields="id",
-                    sendNotificationEmail=False
-                ).execute()
-            except Exception as e:
-                print("Failed to set viewer permission for owner email:", e)
+            permission_body = {
+                "type": "user",
+                "role": "reader",
+                "emailAddress": BOOKS_OWNER_EMAIL
+            }
+            drive_service.permissions().create(
+                fileId=ebook_id,
+                body=permission_body,
+                sendNotificationEmail=False
+            ).execute()
 
-        # 6. Clean up temp file
+        # 5. Cleanup
         try:
             os.remove(temp_path)
-        except Exception:
+        except:
             pass
 
-        # 7. Return link that Flutter app will store in file_path
+        # 6. Return URLs for mobile app / PC
         return {
             "id": ebook_id,
-            "webViewLink": web_view_link,
-            "webContentLink": web_content_link
+            "webViewLink": view_url,
+            "webContentLink": download_url
         }
 
-    except HTTPException:
-        # re-raise FastAPI HTTP exceptions
-        raise
     except Exception as e:
-        print("Upload ebook error:", e)
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Upload ebook failed: {str(e)}")
-
+        raise HTTPException(
+            status_code=500,
+            detail=f"Upload ebook failed: {str(e)}"
+        )
 
 
 @app.get("/backup")

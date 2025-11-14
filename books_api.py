@@ -370,32 +370,47 @@ def oauth_start():
     if not OAUTH_CREDENTIALS_B64:
         raise HTTPException(500, "OAuth credentials missing")
 
+    # decode credentials and get redirect URI
     cred_json = base64.b64decode(OAUTH_CREDENTIALS_B64).decode()
     cred_data = json.loads(cred_json)
 
-    # cred_data is already { "installed": {...} }
+    # cred_data should be { "installed": { ... , "redirect_uris": [...] } }
+    try:
+        redirect_uri = cred_data["installed"]["redirect_uris"][0]
+    except Exception:
+        raise HTTPException(500, "Invalid OAuth credentials: missing redirect_uris")
+
     flow = InstalledAppFlow.from_client_config(
-        cred_data,   # ← FIXED
+        cred_data,
         SCOPES
     )
 
-    auth_url, _ = flow.authorization_url(prompt="consent")
+    # explicitly pass redirect_uri so Google receives it
+    auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline", redirect_uri=redirect_uri)
     return {"auth_url": auth_url}
 
-
-    auth_url, _ = flow.authorization_url(prompt="consent")
-    return {"auth_url": auth_url}
 
 @app.get("/oauth_finish")
 def oauth_finish(code: str):
+    """Finish OAuth and return token to store in Railway."""
+    if not OAUTH_CREDENTIALS_B64:
+        raise HTTPException(500, "OAuth credentials missing")
+
     cred_json = base64.b64decode(OAUTH_CREDENTIALS_B64).decode()
     cred_data = json.loads(cred_json)
 
+    try:
+        redirect_uri = cred_data["installed"]["redirect_uris"][0]
+    except Exception:
+        raise HTTPException(500, "Invalid OAuth credentials: missing redirect_uris")
+
     flow = InstalledAppFlow.from_client_config(
-        cred_data,   # ← FIXED
+        cred_data,
         SCOPES
     )
-    flow.fetch_token(code=code)
+
+    # when exchanging the code, pass the same redirect_uri
+    flow.fetch_token(code=code, redirect_uri=redirect_uri)
 
     token_json = json.dumps({
         "token": flow.credentials.token,
@@ -412,6 +427,7 @@ def oauth_finish(code: str):
         "message": "Paste this into Railway as OAUTH_TOKEN_B64",
         "base64_token": encoded
     }
+
 
 
 @app.post("/upload_ebook")

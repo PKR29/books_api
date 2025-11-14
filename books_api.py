@@ -378,9 +378,10 @@ def oauth_start():
     redirect_uri = cred_data["installed"]["redirect_uris"][0]  # should be http://localhost
 
     flow = InstalledAppFlow.from_client_config(
-        {"installed": cred_data},
+        cred_data,
         SCOPES
     )
+
 
     # IMPORTANT: Only set redirect_uri in THIS place
     flow.redirect_uri = redirect_uri
@@ -408,9 +409,10 @@ def oauth_finish(code: str):
     redirect_uri = cred_data["installed"]["redirect_uris"][0]
 
     flow = InstalledAppFlow.from_client_config(
-        {"installed": cred_data},
+        cred_data,
         SCOPES
     )
+
 
     # AGAIN — only this line should set redirect_uri
     flow.redirect_uri = redirect_uri

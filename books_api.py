@@ -4,6 +4,12 @@
 #  - set Railway environment variables (see README below)
 #  - uvicorn books_api:app --host 0.0.0.0 --port $PORT
 
+from google.auth.transport.requests import Request
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2.credentials import Credentials
+import base64
+import json
+
 import os
 import io
 import json
@@ -35,6 +41,8 @@ DB_FILE = os.environ.get("BOOKS_DB_FILE", "books.db")
 BACKUP_CSV = os.environ.get("BOOKS_BACKUP_CSV", "books_backup.csv")
 BOOKS_OWNER_EMAIL = os.environ.get("BOOKS_OWNER_EMAIL")  # your personal Google email
 EBOOKS_FOLDER_ID = os.environ.get("EBOOKS_FOLDER_ID")
+OAUTH_CREDENTIALS_B64 = os.environ.get("OAUTH_CREDENTIALS_B64")
+OAUTH_TOKEN_B64 = os.environ.get("OAUTH_TOKEN_B64")
 
 # Google Drive related env vars
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")  # full JSON string
@@ -50,6 +58,8 @@ try:
 except Exception as e:
     raise RuntimeError("Failed to parse GOOGLE_SERVICE_ACCOUNT_JSON. Make sure you pasted the JSON content exactly.") from e
 
+
+SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 # Drive scopes
 DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
 
@@ -259,6 +269,32 @@ def update_book(book_id: int, b: BookIn, x_api_key: Optional[str] = Header(None)
         print("Upload after update failed:", e)
     return BookOut(id=book_id, **b.dict())
 
+def get_oauth_drive_service():
+    """Return Google Drive client authenticated as YOUR Gmail using OAuth."""
+    if not OAUTH_CREDENTIALS_B64:
+        raise HTTPException(500, "OAuth credentials missing")
+
+    # Decode credentials.json
+    cred_data = json.loads(base64.b64decode(OAUTH_CREDENTIALS_B64))
+
+    # Load token if it exists
+    token_data = None
+    if OAUTH_TOKEN_B64:
+        token_data = json.loads(base64.b64decode(OAUTH_TOKEN_B64))
+
+    creds = None
+    if token_data:
+        creds = Credentials.from_authorized_user_info(token_data, SCOPES)
+    else:
+        raise HTTPException(500, "OAuth token missing. You must authorize first.")
+
+    # Refresh token if needed
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+
+    return build("drive", "v3", credentials=creds)
+
+
 @app.delete("/books/{book_id}")
 def delete_book(book_id: int, x_api_key: Optional[str] = Header(None)):
     check_key(x_api_key)
@@ -329,6 +365,48 @@ def save_all(payload: List[BookOut], x_api_key: Optional[str] = Header(None)):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="save_all failed")
 
+@app.get("/oauth_start")
+def oauth_start():
+    """Start Gmail OAuth login."""
+    if not OAUTH_CREDENTIALS_B64:
+        raise HTTPException(500, "OAuth credentials missing")
+
+    cred_data = json.loads(base64.b64decode(OAUTH_CREDENTIALS_B64))
+
+    flow = InstalledAppFlow.from_client_config(
+        {"installed": cred_data},
+        SCOPES
+    )
+
+    auth_url, _ = flow.authorization_url(prompt="consent")
+    return {"auth_url": auth_url}
+
+@app.get("/oauth_finish")
+def oauth_finish(code: str):
+    """Finish OAuth and return token to store in Railway."""
+    cred_data = json.loads(base64.b64decode(OAUTH_CREDENTIALS_B64))
+
+    flow = InstalledAppFlow.from_client_config(
+        {"installed": cred_data},
+        SCOPES
+    )
+    flow.fetch_token(code=code)
+
+    token_json = json.dumps({
+        "token": flow.credentials.token,
+        "refresh_token": flow.credentials.refresh_token,
+        "token_uri": flow.credentials.token_uri,
+        "client_id": flow.credentials.client_id,
+        "client_secret": flow.credentials.client_secret,
+        "scopes": flow.credentials.scopes
+    })
+
+    encoded = base64.b64encode(token_json.encode()).decode()
+
+    return {
+        "message": "Paste this into Railway as OAUTH_TOKEN_B64",
+        "base64_token": encoded
+    }
 
 @app.post("/upload_ebook")
 async def upload_ebook(

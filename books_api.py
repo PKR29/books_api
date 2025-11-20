@@ -237,36 +237,50 @@ def get_books(x_api_key: Optional[str] = Header(None)):
 @app.post("/books", response_model=BookOut)
 def add_book(b: BookIn, x_api_key: Optional[str] = Header(None)):
     check_key(x_api_key)
-    # insert with next id
+
     new_id = get_next_id_local()
     insert_book_local_with_id(new_id, b.title, b.author, b.status, b.rating, b.notes, b.file_path)
-    # upload DB to Drive (sync)
+
     try:
         upload_db_to_drive()
     except Exception as e:
         print("Upload after add failed:", e)
-        # continue — server still returns success; client can retry backup
+
+    # 🔥 NEW — auto backup CSV
+    backup(x_api_key)
+
     return BookOut(id=new_id, **b.dict())
+
 
 @app.put("/books/{book_id}", response_model=BookOut)
 def update_book(book_id: int, b: BookIn, x_api_key: Optional[str] = Header(None)):
     check_key(x_api_key)
+
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
+
     cur.execute("SELECT id FROM books WHERE id=?", (book_id,))
     if cur.fetchone() is None:
         conn.close()
         raise HTTPException(status_code=404, detail="Book not found")
-    cur.execute("""UPDATE books SET title=?, author=?, status=?, rating=?, notes=?, file_path=? WHERE id=?""",
-                (b.title, b.author, b.status, b.rating, b.notes, b.file_path, book_id))
+
+    cur.execute(
+        "UPDATE books SET title=?, author=?, status=?, rating=?, notes=?, file_path=? WHERE id=?",
+        (b.title, b.author, b.status, b.rating, b.notes, b.file_path, book_id)
+    )
     conn.commit()
     conn.close()
-    # upload DB to Drive
+
     try:
         upload_db_to_drive()
     except Exception as e:
         print("Upload after update failed:", e)
+
+    # 🔥 NEW — auto backup CSV
+    backup(x_api_key)
+
     return BookOut(id=book_id, **b.dict())
+
 
 def get_oauth_drive_service():
     """Return Google Drive client authenticated as YOUR Gmail using OAuth."""
@@ -301,19 +315,15 @@ def delete_book(book_id: int, x_api_key: Optional[str] = Header(None)):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
 
-    # 1. Delete the book
     cur.execute("DELETE FROM books WHERE id=?", (book_id,))
     conn.commit()
 
-    # 2. Fetch remaining books ordered by current ID (without ids)
     cur.execute("SELECT title, author, status, rating, notes, file_path FROM books ORDER BY id")
     rows = cur.fetchall()
 
-    # 3. Clear the table
     cur.execute("DELETE FROM books")
     conn.commit()
 
-    # 4. Reinsert rows with NEW continuous IDs starting from 1
     new_id = 1
     for r in rows:
         cur.execute(
@@ -325,44 +335,58 @@ def delete_book(book_id: int, x_api_key: Optional[str] = Header(None)):
     conn.commit()
     conn.close()
 
-    # upload DB to Drive
     try:
         upload_db_to_drive()
     except Exception as e:
         print("Upload after delete failed:", e)
 
+    # 🔥 NEW — auto backup CSV
+    backup(x_api_key)
+
     return {"detail": "deleted_and_renumbered"}
+
 
 @app.post("/save_all")
 def save_all(payload: List[BookOut], x_api_key: Optional[str] = Header(None)):
-    """
-    Replace entire DB with the provided list (used by client save_all).
-    Payload: list of BookOut-like dicts (with id, title, author, ...)
-    We'll rewrite the table and renumber ids sequentially based on provided order.
-    """
     check_key(x_api_key)
+
     try:
         conn = sqlite3.connect(DB_FILE)
         cur = conn.cursor()
         cur.execute("DELETE FROM books")
+
         new_id = 1
         for item in payload:
             cur.execute(
                 "INSERT INTO books (id, title, author, status, rating, notes, file_path) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (new_id, item.get("title", ""), item.get("author", ""), item.get("status", ""), item.get("rating", ""), item.get("notes", ""), item.get("file_path", "")) 
+                (new_id,
+                 item.get("title", ""),
+                 item.get("author", ""),
+                 item.get("status", ""),
+                 item.get("rating", ""),
+                 item.get("notes", ""),
+                 item.get("file_path", "")
+                )
             )
             new_id += 1
+
         conn.commit()
         conn.close()
-        # upload DB to Drive
+
         try:
             upload_db_to_drive()
         except Exception as e:
             print("Upload after save_all failed:", e)
+
+        # 🔥 NEW — auto backup CSV
+        backup(x_api_key)
+
         return {"detail": "saved"}
+
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="save_all failed")
+
 
 import secrets
 import urllib.parse
